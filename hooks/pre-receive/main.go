@@ -2,18 +2,36 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"errors"
-	"github.com/libgit2/git2go/v33"
+	"io"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 )
 
-type Hash = []byte
+type ID [20]byte
+
+var ZeroID = ID{}
+
+func ParseID(str string) (ID, error) {
+	slice, err := hex.DecodeString(str)
+	if err != nil {
+		return ID{}, err
+	}
+	var id ID
+	copy(id[:], slice)
+	return id, err
+}
+
+func (id ID) String() string {
+	return hex.EncodeToString(id[:])
+}
 
 type RefUpdate struct {
-	From git.Oid
-	To   git.Oid
+	From ID
+	To   ID
 	Ref  string
 }
 
@@ -23,17 +41,23 @@ func parseRefUpdate(line string) (*RefUpdate, error) {
 		log.Printf("Parts: %v", parts)
 		return nil, errors.New("wrong number of columns")
 	}
+	from, err := ParseID(parts[0])
+	if err != nil {
+		return nil, errors.New("Wrong ID format")
+	}
+	to, err := ParseID(parts[1])
+	if err != nil {
+		return nil, errors.New("Wrong ID format")
+	}
 	return &RefUpdate{
-		From: git.NewOid(parts[0]),
-		To:   git.NewOid(parts[1]),
+		From: from,
+		To:   to,
 		Ref:  parts[2],
 	}, nil
 }
 
 func main() {
 	log.Printf("env:%v args:%v", os.Environ(), os.Args)
-
-	root := os.Getenv("GIT_PROJECT_ROOT")
 
 	i := bufio.NewScanner(os.Stdin)
 
@@ -46,20 +70,66 @@ func main() {
 		refUpdates = append(refUpdates, refUpdate)
 	}
 
-	repo, err := git.OpenRepository(root)
-	if err != nil {ssh pc
-		log.Fatal("Opening repo: %v", err)
+	for _, update := range refUpdates {
+		sigStatus, err := update.To.checkSig()
+		if err != nil {
+			log.Fatalf("Could not check signature: %v", err)
+		}
+		if sigStatus != SigValid {
+			log.Fatalf("Signature for %v is %v", update.Ref, sigStatus.ToString())
+		}
+	}
+}
+
+type SigStatus int8
+
+const (
+	SigUnknown SigStatus = iota
+	SigAbsent
+	SigValid
+)
+
+func (s SigStatus) ToString() string {
+	switch s {
+	case SigValid:
+		return "valid"
+	case SigAbsent:
+		return "absent"
+	}
+	return "unknown"
+}
+
+func (id *ID) checkSig() (SigStatus, error) {
+	if *id == ZeroID {
+		return SigAbsent, nil
 	}
 
-	for _, update := range refUpdates {
-		obj, err := repo.LookupCommit(&update.To)
-		if err != nil {
-			log.Fatalf("Looking up commit %v: %v", update.Ref, err)
-		}
-		a, b, err := obj.ExtractSignature()
-		if err != nil {
-			log.Fatalf("Looking up signature for %v: %v", update.Ref, err)
-		}
-		log.Printf("Signature: %v %v", a, b)
+	command := []string{"show", "--show-signature", "--pretty=format:", "--no-patch", id.String()}
+	cmd := exec.Command("git", command...)
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return SigUnknown, err
 	}
+
+	go io.Copy(os.Stdout, stderr)
+
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return SigUnknown, err
+	}
+	if err := cmd.Start(); err != nil {
+		return SigUnknown, err
+	}
+	scanner := bufio.NewScanner(out)
+	sigStatus := SigAbsent
+	for scanner.Scan() {
+		if strings.HasPrefix(scanner.Text(), `Good "git" signature for `) {
+			sigStatus = SigValid
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return SigUnknown, err
+	}
+	return sigStatus, nil
 }
