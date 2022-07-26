@@ -1,62 +1,15 @@
-package main
+package git_remote_dx
 
 import (
+	"bufio"
 	"errors"
-	"io"
+	"fmt"
 	"log"
 	"net/url"
 	"os"
-	"os/exec"
+	"strconv"
 	"strings"
 )
-
-func main() {
-	var relatedEnv []string
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "GIT_") {
-			relatedEnv = append(relatedEnv, env)
-		}
-	}
-
-	repo := os.Args[2]
-
-	host, prefix, err := resolveRef(repo)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("STARTUP\nargs:%v\nenv:%v\nhost:%v\nprefix:%v", os.Args, relatedEnv, host, prefix)
-
-	constructed := []string{os.Args[1], host, prefix}
-
-	kbCmd := exec.Command("git", "dx", "remote", host, prefix)
-	log.Printf("exec git dx remote %v", strings.Join(constructed, " "))
-
-	remoteOutput, err := kbCmd.StdoutPipe()
-	if err != nil {
-		log.Fatalf("read stdout: %v", err)
-	}
-	remoteErr, err := kbCmd.StderrPipe()
-	if err != nil {
-		log.Fatalf("read stderr: %v", err)
-	}
-	remoteInput, err := kbCmd.StdinPipe()
-	if err != nil {
-		log.Fatalf("write stdin: %v", err)
-	}
-
-	if err := kbCmd.Start(); err != nil {
-		log.Fatalf("git dx remote: %v", err)
-	}
-
-	go io.Copy(os.Stderr, remoteErr)
-	go io.Copy(os.Stdout, remoteOutput)
-	go io.Copy(remoteInput, os.Stdin)
-
-	if err := kbCmd.Wait(); err != nil {
-		log.Fatalf("git dx remote: %v", err)
-	}
-}
 
 var (
 	ErrWrongScheme = errors.New("not in dx:// schema")
@@ -68,7 +21,8 @@ func resolveRef(repo string) (string, string, error) {
 		return "", "", err
 	}
 	if u.Scheme != "dx" {
-		return "", "", ErrWrongScheme
+		msg := fmt.Sprintf("not in dx:// schema: %s", repo)
+		return "", "", errors.New(msg)
 	}
 	h := u.Host
 	hostParts := strings.Split(h, ".")
@@ -79,4 +33,56 @@ func resolveRef(repo string) (string, string, error) {
 	pathSpec += strings.Join(hostParts, "/")
 	pathSpec += u.Path
 	return h, pathSpec, nil
+}
+
+func Run() {
+	repo := os.Args[3]
+
+	host, prefix, err := resolveRef(repo)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var gitEnv []string
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "GIT_") {
+			gitEnv = append(gitEnv, env)
+		}
+	}
+
+	log.Printf("STARTUP\nargs:%v\nenv:%v\nhost:%v\nprefix:%v", os.Args, gitEnv, host, prefix)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("tracking https://%v/.well-known on %v", host, prefix)
+
+	in := bufio.NewScanner(os.Stdin)
+	out := bufio.NewWriter(os.Stdout)
+
+	writeAndFlush := func(str string) error {
+		if _, err := out.WriteString(str); err != nil {
+			return err
+		}
+		if err := out.Flush(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	for in.Scan() {
+		txt := in.Text()
+		log.Printf("< %s", strconv.Quote(txt))
+		switch txt {
+		case "":
+			return
+		case "capabilities":
+			writeAndFlush("refspec\npush\nfetch\n\n")
+		case "list":
+			writeAndFlush("\n")
+		case "list for-push":
+			writeAndFlush("\n")
+		}
+	}
 }
