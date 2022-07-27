@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -35,8 +34,17 @@ func resolveRef(repo string) (string, string, error) {
 	return h, pathSpec, nil
 }
 
-func Run() {
-	repo := os.Args[3]
+type Push struct {
+	From string
+	To   string
+}
+
+func (p *Push) ToString() string {
+	return fmt.Sprintf("%v -> %v", p.From, p.To)
+}
+
+func Run(args []string) {
+	repo := args[1]
 
 	host, prefix, err := resolveRef(repo)
 	if err != nil {
@@ -71,18 +79,28 @@ func Run() {
 		return nil
 	}
 
+	pushes := []Push{}
 	for in.Scan() {
 		txt := in.Text()
-		log.Printf("< %s", strconv.Quote(txt))
-		switch txt {
-		case "":
-			return
-		case "capabilities":
+		switch {
+		case txt == "capabilities":
 			writeAndFlush("refspec\npush\nfetch\n\n")
-		case "list":
+		case txt == "list":
 			writeAndFlush("\n")
-		case "list for-push":
+		case txt == "list for-push":
 			writeAndFlush("\n")
+		case strings.HasPrefix(txt, "push "):
+			refspec := txt[5:]
+			parts := strings.Split(refspec, ":")
+			pushes = append(pushes, Push{
+				From: parts[0],
+				To:   parts[1],
+			})
+		case txt == "":
+			if len(pushes) > 0 {
+				log.Printf("pushes: %v", pushes)
+			}
+			return
 		}
 	}
 }

@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
-	"io"
+	"fmt"
+	"golang.org/x/crypto/ssh"
 	"log"
 	"os"
 	"os/exec"
+	"pcarrier.com/ssh/signatures"
+	"strconv"
 	"strings"
 )
 
@@ -70,66 +74,112 @@ func main() {
 		refUpdates = append(refUpdates, refUpdate)
 	}
 
+	args := []string{"show-ref"}
+	cmd := exec.Command("git", args...)
+	var outb, errb bytes.Buffer
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		log.Fatalf("Couldn't show-ref (%v).", err)
+	}
+	log.Printf("%v %v", strconv.Quote(outb.String()), strconv.Quote(errb.String()))
+
 	for _, update := range refUpdates {
-		sigStatus, err := update.To.checkSig()
+		log.Printf("%v: %v -> %v", update.Ref, update.From, update.To)
+		sigStatus, err := update.checkSig()
 		if err != nil {
 			log.Fatalf("Could not check signature: %v", err)
 		}
-		if sigStatus != SigValid {
+		if sigStatus != signatures.SigValid {
 			log.Fatalf("Signature for %v is %v", update.Ref, sigStatus.ToString())
 		}
 	}
 }
 
-type SigStatus int8
+type ObjectType int8
 
 const (
-	SigUnknown SigStatus = iota
-	SigAbsent
-	SigValid
+	InvalidObject ObjectType = 0
+	CommitObject  ObjectType = 1
+	TreeObject    ObjectType = 2
+	BlobObject    ObjectType = 3
+	TagObject     ObjectType = 4
+	// 5 reserved for future expansion
+	OFSDeltaObject ObjectType = 6
+	REFDeltaObject ObjectType = 7
+
+	AnyObject ObjectType = -127
 )
 
-func (s SigStatus) ToString() string {
-	switch s {
-	case SigValid:
-		return "valid"
-	case SigAbsent:
-		return "absent"
+func getType(id ID) (ObjectType, error) {
+	cmd := exec.Command("git", "cat-file", "-t", id.String())
+	var outb, errb bytes.Buffer
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		return InvalidObject, err
 	}
-	return "unknown"
+	if errb.Len() != 0 {
+		return InvalidObject, err
+	}
+
+	typ := outb.String()
+	switch typ {
+	case "tree\n":
+		return TreeObject, nil
+	case "commit\n":
+		return CommitObject, nil
+	case "tag\n":
+		return TagObject, nil
+	case "blob\n":
+		return BlobObject, nil
+	default:
+		return InvalidObject, errors.New(fmt.Sprintf("unknown type %s", typ))
+	}
 }
 
-func (id *ID) checkSig() (SigStatus, error) {
-	if *id == ZeroID {
-		return SigAbsent, nil
+func (ru RefUpdate) checkSig() (signatures.SigStatus, error) {
+	if ru.To == ZeroID {
+		return signatures.SigAbsent, nil
 	}
 
-	command := []string{"show", "--show-signature", "--pretty=format:", "--no-patch", id.String()}
-	cmd := exec.Command("git", command...)
-
-	stderr, err := cmd.StderrPipe()
+	typ, err := getType(ru.To)
 	if err != nil {
-		return SigUnknown, err
+		return signatures.SigAbsent, err
 	}
-
-	go io.Copy(os.Stdout, stderr)
-
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return SigUnknown, err
-	}
-	if err := cmd.Start(); err != nil {
-		return SigUnknown, err
-	}
-	scanner := bufio.NewScanner(out)
-	sigStatus := SigAbsent
-	for scanner.Scan() {
-		if strings.HasPrefix(scanner.Text(), `Good "git" signature for `) {
-			sigStatus = SigValid
+	switch typ {
+	case TagObject:
+		cmd := exec.Command("git", "cat-file", "tag", ru.To.String())
+		var outb bytes.Buffer
+		cmd.Stdout = &outb
+		err := cmd.Run()
+		if err != nil {
+			log.Fatalf("Couldn't show tag %v (%v).", ru.Ref, err)
 		}
+		sigStatus := signatures.CheckTag(func(pk ssh.PublicKey) bool {
+			return true
+		}, bytes.NewReader(outb.Bytes()))
+		return sigStatus, nil
+	case CommitObject:
+		cmd := exec.Command("git", "cat-file", "commit", ru.To.String())
+		var outb bytes.Buffer
+		cmd.Stdout = &outb
+		err := cmd.Run()
+		if err != nil {
+			log.Fatalf("Couldn't show commit %v (%v).", ru.Ref, err)
+		}
+		status, err := signatures.CheckCommit(func(pk ssh.PublicKey) bool {
+			return true
+		}, bytes.NewReader(outb.Bytes()))
+		if err != nil {
+			log.Fatalf("Couldn't check status (%v).", err)
+		}
+		return status, nil
+	default:
+		return signatures.SigAbsent, errors.New(fmt.Sprintf("unsupported object type %v", typ))
 	}
-	if err := cmd.Wait(); err != nil {
-		return SigUnknown, err
-	}
-	return sigStatus, nil
+
+	return signatures.SigAbsent, nil
 }

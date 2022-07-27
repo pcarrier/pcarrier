@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	git_remote_dx "pcarrier.com/git-remote-dx"
+	"pcarrier.com/ssh/signatures"
 	"syscall"
 )
 
@@ -41,7 +42,9 @@ func main() {
 	cmd := os.Args[1]
 	switch cmd {
 	case "git-remote-dx":
-		git_remote_dx.Run()
+		git_remote_dx.Run(os.Args[2:])
+	case "sig":
+		signatures.Run()
 	default:
 		syscall.Exec(findUnderDx(), os.Args, os.Environ())
 	}
