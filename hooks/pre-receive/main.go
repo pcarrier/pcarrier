@@ -87,6 +87,12 @@ func main() {
 
 	for _, update := range refUpdates {
 		log.Printf("%v: %v -> %v", update.Ref, update.From, update.To)
+		if !strings.HasPrefix(update.Ref, "refs/") {
+			log.Fatalf("ref does not start with refs/: %s", update.Ref)
+		}
+		parts := strings.Split(update.Ref, "/")
+		parts = parts[1 : len(parts)-1]
+		log.Printf(strings.Join(parts, "/"))
 		sigStatus, err := update.checkSig()
 		if err != nil {
 			log.Fatalf("Could not check signature: %v", err)
