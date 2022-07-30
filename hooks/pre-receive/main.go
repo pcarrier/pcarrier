@@ -91,8 +91,11 @@ func main() {
 			log.Fatalf("ref does not start with refs/: %s", update.Ref)
 		}
 		parts := strings.Split(update.Ref, "/")
-		parts = parts[1 : len(parts)-1]
-		log.Printf(strings.Join(parts, "/"))
+		parts = parts[0 : len(parts)-1]
+		for cutAt := len(parts); cutAt > 0; cutAt-- {
+			log.Printf("Looking for %s/@meta", strings.Join(parts[:cutAt], "/"))
+		}
+
 		sigStatus, err := update.checkSig()
 		if err != nil {
 			log.Fatalf("Could not check signature: %v", err)
