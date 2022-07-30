@@ -39,8 +39,8 @@ type Push struct {
 	To   string
 }
 
-func (p *Push) ToString() string {
-	return fmt.Sprintf("%v -> %v", p.From, p.To)
+func (p *Push) String() string {
+	return fmt.Sprintf("%v → %v", p.From, p.To)
 }
 
 func Run(args []string) {

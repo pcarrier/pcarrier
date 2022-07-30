@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,8 +11,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"pcarrier.com/core"
 	"pcarrier.com/ssh/signatures"
-	"strconv"
 	"strings"
 )
 
@@ -74,29 +75,49 @@ func main() {
 		refUpdates = append(refUpdates, refUpdate)
 	}
 
-	args := []string{"show-ref"}
-	cmd := exec.Command("git", args...)
-	var outb, errb bytes.Buffer
-	cmd.Stdout = &outb
-	cmd.Stderr = &errb
-	err := cmd.Run()
-	if err != nil {
-		log.Fatalf("Couldn't show-ref (%v).", err)
-	}
-	log.Printf("%v %v", strconv.Quote(outb.String()), strconv.Quote(errb.String()))
-
 	for _, update := range refUpdates {
-		log.Printf("%v: %v -> %v", update.Ref, update.From, update.To)
 		if !strings.HasPrefix(update.Ref, "refs/") {
 			log.Fatalf("ref does not start with refs/: %s", update.Ref)
 		}
 		parts := strings.Split(update.Ref, "/")
 		parts = parts[0 : len(parts)-1]
+
+		allowedKeys := map[string]core.Void{}
+
 		for cutAt := len(parts); cutAt > 0; cutAt-- {
-			log.Printf("Looking for %s/@meta", strings.Join(parts[:cutAt], "/"))
+			prefix := strings.Join(parts[:cutAt], "/")
+			path := prefix + "/@meta:.ssh/authorized_keys"
+			cmd := exec.Command("git", "cat-file", "blob", path)
+			var outb, errb bytes.Buffer
+			cmd.Stdout = &outb
+			cmd.Stderr = &errb
+			if err := cmd.Run(); err != nil {
+				log.Printf("Didn't find keys in %s: %v", path)
+			} else {
+				scanner := bufio.NewScanner(&outb)
+				for scanner.Scan() {
+					pk, comment, _, _, err := ssh.ParseAuthorizedKey(scanner.Bytes())
+					if err != nil {
+						log.Printf("Ignored line %v: %v", scanner.Bytes(), err)
+					} else {
+						b64 := base64.RawStdEncoding.EncodeToString(pk.Marshal())
+						log.Printf("%v allowing %s", path, b64)
+						allowedKeys[b64] = core.V
+					}
+				}
+			}
 		}
 
-		sigStatus, err := update.checkSig()
+		sigStatus, err := update.checkSig(func(pk ssh.PublicKey) bool {
+			b64 := base64.RawStdEncoding.EncodeToString(pk.Marshal())
+			_, found := allowedKeys[b64]
+			if found {
+				log.Printf("%v allowed %v", update.Ref, b64)
+			} else {
+				log.Printf("%v rejected %v", update.Ref, b64)
+			}
+			return found
+		})
 		if err != nil {
 			log.Fatalf("Could not check signature: %v", err)
 		}
@@ -149,7 +170,7 @@ func getType(id ID) (ObjectType, error) {
 	}
 }
 
-func (ru RefUpdate) checkSig() (signatures.SigStatus, error) {
+func (ru RefUpdate) checkSig(allowed signatures.Allowed) (signatures.SigStatus, error) {
 	if ru.To == ZeroID {
 		return signatures.SigAbsent, nil
 	}
@@ -167,9 +188,7 @@ func (ru RefUpdate) checkSig() (signatures.SigStatus, error) {
 		if err != nil {
 			log.Fatalf("Couldn't show tag %v (%v).", ru.Ref, err)
 		}
-		sigStatus := signatures.CheckTag(func(pk ssh.PublicKey) bool {
-			return true
-		}, bytes.NewReader(outb.Bytes()))
+		sigStatus := signatures.CheckTag(allowed, bytes.NewReader(outb.Bytes()))
 		return sigStatus, nil
 	case CommitObject:
 		cmd := exec.Command("git", "cat-file", "commit", ru.To.String())
@@ -179,9 +198,7 @@ func (ru RefUpdate) checkSig() (signatures.SigStatus, error) {
 		if err != nil {
 			log.Fatalf("Couldn't show commit %v (%v).", ru.Ref, err)
 		}
-		status, err := signatures.CheckCommit(func(pk ssh.PublicKey) bool {
-			return true
-		}, bytes.NewReader(outb.Bytes()))
+		status, err := signatures.CheckCommit(allowed, bytes.NewReader(outb.Bytes()))
 		if err != nil {
 			log.Fatalf("Couldn't check status (%v).", err)
 		}
